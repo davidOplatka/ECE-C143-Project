@@ -12,6 +12,50 @@ from torch.utils.data import DataLoader
 from .model import GRUDecoder
 from .dataset import SpeechDataset
 
+def apply_time_mask_batch(X, X_len, n_masks, max_mask_frac):
+    """
+    Time-masking augmentation for GRU baseline.
+
+    Args:
+        X:        (B, T, C) tensor of neural features; B: batch size, T: max sequence length (padded), C: feature dim
+        X_len:    (B,) tensor of true sequence lengths (no padding, in time bins).
+        n_masks:  int, number of masks per trial (N in the paper).
+        max_mask_frac: float, max mask length as fraction of trial length (M in the paper).
+
+    Returns:
+        X with contiguous time segments zeroed out within [0, X_len[b]) for each b.
+    """
+    if n_masks <= 0 or max_mask_frac <= 0:
+        return X
+
+    B, T, C = X.shape
+    device = X.device
+
+    for b in range(B):
+        L = int(X_len[b].item())
+        if L <= 0:
+            continue
+
+        F = int(max_mask_frac * L)  # max mask length in time bins
+        if F <= 0:
+            continue
+
+        # For each mask, sample start S ~ U(0, L-F) and duration D ~ U(0, F)
+        for _ in range(n_masks):
+            max_start = max(L - F, 0)
+            # start index
+            if max_start > 0:
+                S = torch.randint(0, max_start + 1, (1,), device=device).item()
+            else:
+                S = 0
+            # duration (can be 0..F)
+            D = torch.randint(0, F + 1, (1,), device=device).item()
+
+            end = min(S + D, L)
+            X[b, S:end, :] = 0.0
+
+    return X
+
 
 def getDatasetLoaders(
     datasetName,
@@ -124,6 +168,12 @@ def trainModel(args):
                 torch.randn([X.shape[0], 1, X.shape[2]], device=device)
                 * args["constantOffsetSD"]
             )
+
+        # Apply time masking augmentation
+        n_masks = args.get("timeMaskNum", 0)
+        max_mask_frac = args.get("timeMaskMaxFrac", 0.0)
+        if n_masks > 0 and max_mask_frac > 0.0:
+            X = apply_time_mask_batch(X, X_len, n_masks, max_mask_frac)
 
         # Compute prediction error
         pred = model.forward(X, dayIdx)

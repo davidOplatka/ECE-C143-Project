@@ -24,6 +24,10 @@ args['kernelLen'] = 32
 args['bidirectional'] = False
 args['l2_decay'] = 1e-5
 
+# --- Time masking hyperparameters ---
+args['timeMaskNum'] = 20        # N: number of masks per trial
+args['timeMaskMaxFrac'] = 0.075 # M: max mask length as fraction of trial length
+
 from neural_decoder.neural_decoder_trainer import trainModel
 
 trainModel(args)

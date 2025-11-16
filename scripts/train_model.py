@@ -7,8 +7,11 @@ args['datasetPath'] = '../data/ptDecoder_ctc'
 args['seqLen'] = 150
 args['maxTimeSeriesLen'] = 1200
 args['batchSize'] = 64
+args['optimizer'] = 'ADAM'
 args['lrStart'] = 0.02
 args['lrEnd'] = 0.02
+args['optimizerEps'] = 0.1
+args['l2_decay'] = 1e-5
 args['nUnits'] = 1024
 args['nBatch'] = 10000 #3000
 args['nLayers'] = 5
@@ -22,7 +25,6 @@ args['gaussianSmoothWidth'] = 2.0
 args['strideLen'] = 4
 args['kernelLen'] = 32
 args['bidirectional'] = False
-args['l2_decay'] = 1e-5
 
 # --- Time masking hyperparameters ---
 args['timeMaskNum'] = 20        # N: number of masks per trial

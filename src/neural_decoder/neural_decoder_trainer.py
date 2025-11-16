@@ -9,9 +9,18 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 
-from .model import GRUDecoder
+from .model import GRUDecoder, LSTMDecoder
 from .dataset import SpeechDataset
 
+def apply_speckle_mask(X, p: float):
+    """
+    Speckled masking / coordinated dropout over neural inputs.
+    """
+    if p <= 0.0:
+        return X
+    # Random mask keep with prob (1-p), zero with prob p
+    mask = (torch.rand_like(X) > p).float()
+    return X * mask
 
 def getDatasetLoaders(
     datasetName,
@@ -36,12 +45,15 @@ def getDatasetLoaders(
     train_ds = SpeechDataset(loadedData["train"], transform=None)
     test_ds = SpeechDataset(loadedData["test"])
 
+    # Only pin memory when CUDA is available to avoid warnings on CPU-only systems
+    use_pin_memory = torch.cuda.is_available()
+
     train_loader = DataLoader(
         train_ds,
         batch_size=batchSize,
         shuffle=True,
         num_workers=0,
-        pin_memory=True,
+        pin_memory=use_pin_memory,
         collate_fn=_padding,
     )
     test_loader = DataLoader(
@@ -49,7 +61,7 @@ def getDatasetLoaders(
         batch_size=batchSize,
         shuffle=False,
         num_workers=0,
-        pin_memory=True,
+        pin_memory=use_pin_memory,
         collate_fn=_padding,
     )
 
@@ -59,7 +71,11 @@ def trainModel(args):
     os.makedirs(args["outputDir"], exist_ok=True)
     torch.manual_seed(args["seed"])
     np.random.seed(args["seed"])
-    device = "cuda"
+    # Select device: use GPU only if CUDA is available and initialized.
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Log chosen device so it's explicit in the output
+    print(f"Using device: {device}")
 
     with open(args["outputDir"] + "/args", "wb") as file:
         pickle.dump(args, file)
@@ -69,7 +85,20 @@ def trainModel(args):
         args["batchSize"],
     )
 
-    model = GRUDecoder(
+       # Choose RNN type (default to GRU if not specified)
+    if "rnn_type" in args:
+        rnn_type = str(args["rnn_type"]).lower()
+    else:
+        rnn_type = "gru"
+
+    if rnn_type == "gru":
+        ModelClass = GRUDecoder
+    elif rnn_type == "lstm":
+        ModelClass = LSTMDecoder
+    else:
+        raise ValueError(f"Unknown rnn_type: {rnn_type}. Use 'gru' or 'lstm'.")
+
+    model = ModelClass(
         neural_dim=args["nInputFeatures"],
         n_classes=args["nClasses"],
         hidden_dim=args["nUnits"],
@@ -82,6 +111,7 @@ def trainModel(args):
         gaussianSmoothWidth=args["gaussianSmoothWidth"],
         bidirectional=args["bidirectional"],
     ).to(device)
+
 
     loss_ctc = torch.nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
     optimizer = torch.optim.Adam(
@@ -123,6 +153,10 @@ def trainModel(args):
                 torch.randn([X.shape[0], 1, X.shape[2]], device=device)
                 * args["constantOffsetSD"]
             )
+        # Speckled masking / coordinated dropout on neural inputs 
+        speckle_prob = args["speckle_prob"] if "speckle_prob" in args else 0.0
+        if speckle_prob > 0.0:
+            X = apply_speckle_mask(X, speckle_prob)
 
         # Compute prediction error
         pred = model.forward(X, dayIdx)
@@ -138,6 +172,13 @@ def trainModel(args):
         # Backpropagation
         optimizer.zero_grad()
         loss.backward()
+
+        # Gradient clipping to prevent exploding gradients
+        max_grad_norm = args["max_grad_norm"] if "max_grad_norm" in args else 0.0
+        if max_grad_norm and max_grad_norm > 0.0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+
+
         optimizer.step()
         scheduler.step()
 
@@ -218,7 +259,20 @@ def loadModel(modelDir, nInputLayers=24, device="cuda"):
     with open(modelDir + "/args", "rb") as handle:
         args = pickle.load(handle)
 
-    model = GRUDecoder(
+    # rnn_type might not exist for older runs → default to GRU
+    if "rnn_type" in args:
+        rnn_type = str(args["rnn_type"]).lower()
+    else:
+        rnn_type = "gru"
+
+    if rnn_type == "gru":
+        ModelClass = GRUDecoder
+    elif rnn_type == "lstm":
+        ModelClass = LSTMDecoder
+    else:
+        raise ValueError(f"Unknown rnn_type: {rnn_type}. Use 'gru' or 'lstm'.")
+
+    model = ModelClass(
         neural_dim=args["nInputFeatures"],
         n_classes=args["nClasses"],
         hidden_dim=args["nUnits"],

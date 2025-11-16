@@ -1,9 +1,23 @@
 
+import sys
+import pathlib
+
+# Ensure the project's `src/` directory is on sys.path so package imports work
+# when running this script directly (without installing the package).
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'src'))
+
 modelName = 'speechBaseline4'
 
 args = {}
+<<<<<<< Updated upstream
 args['outputDir'] = '/oak/stanford/groups/henderj/stfan/logs/speech_logs/' + modelName
 args['datasetPath'] = '/oak/stanford/groups/henderj/fwillett/speech/ptDecoder_ctc'
+=======
+args['outputDir'] = '../models/' + modelName
+# dataset path should be relative to the project root when running
+# `python .\scripts\train_model.py` from the repository root.
+args['datasetPath'] = 'data/ptDecoder_ctc'
+>>>>>>> Stashed changes
 args['seqLen'] = 150
 args['maxTimeSeriesLen'] = 1200
 args['batchSize'] = 64

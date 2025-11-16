@@ -147,7 +147,6 @@ def trainModel(args):
     testCER = []
     startTime = time.time()
     for batch in range(args["nBatch"]):
-        print(batch)
         model.train()
 
         X, y, X_len, y_len, dayIdx = next(iter(trainLoader))

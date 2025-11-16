@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-
+import math
 from .augmentations import GaussianSmoothing
 
 
@@ -120,4 +120,139 @@ class GRUDecoder(nn.Module):
 
         # get seq
         seq_out = self.fc_decoder_out(hid)
+        return seq_out
+
+# Transformer Starts Here
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, dropout=0.0, max_len=5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2, dtype=torch.float32)
+            * (-math.log(10000.0) / d_model)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        pe = pe.unsqueeze(1)  # (max_len, 1, d_model)
+        self.register_buffer("pe", pe)
+
+    def forward(self, x):
+        """
+        x: (S, B, d_model), S - sequence length, B - batch size, d_model - embedding dim
+        """
+        S = x.size(0)
+        x = x + self.pe[:S]  # broadcast over batch
+        return self.dropout(x)
+
+class TransformerDecoder(nn.Module):
+    def __init__(
+        self,
+        neural_dim,
+        n_classes,
+        hidden_dim,          # same as d_model
+        layer_dim,           # num of transformer layers
+        nDays=24,
+        dropout=0.0,
+        device="cuda",
+        strideLen=4,
+        kernelLen=14,
+        gaussianSmoothWidth=0,
+        bidirectional=False,  # unused, just for API compatibility
+        nhead=8,
+        dim_feedforward=2048,
+    ):
+        super().__init__()
+
+        self.layer_dim = layer_dim
+        self.hidden_dim = hidden_dim
+        self.neural_dim = neural_dim
+        self.n_classes = n_classes
+        self.nDays = nDays
+        self.device = device
+        self.dropout = dropout
+        self.strideLen = strideLen
+        self.kernelLen = kernelLen
+        self.gaussianSmoothWidth = gaussianSmoothWidth
+
+        self.inputLayerNonlinearity = nn.Softsign()
+        self.unfolder = nn.Unfold(
+            (self.kernelLen, 1), dilation=1, padding=0, stride=self.strideLen
+        )
+        self.gaussianSmoother = GaussianSmoothing(
+            neural_dim, 20, self.gaussianSmoothWidth, dim=1
+        )
+        self.dayWeights = nn.Parameter(torch.randn(nDays, neural_dim, neural_dim))
+        self.dayBias = nn.Parameter(torch.zeros(nDays, 1, neural_dim))
+
+        for x in range(nDays):
+            self.dayWeights.data[x, :, :] = torch.eye(neural_dim)
+
+        # Per-day input layers (same as GRUDecoder)
+        for x in range(nDays):
+            setattr(self, "inpLayer" + str(x), nn.Linear(neural_dim, neural_dim))
+
+        for x in range(nDays):
+            thisLayer = getattr(self, "inpLayer" + str(x))
+            thisLayer.weight = nn.Parameter(thisLayer.weight + torch.eye(neural_dim))
+
+        # Project unfolded window to d_model (hidden_dim), match dim for transformer
+        self.input_proj = nn.Linear(neural_dim * self.kernelLen, hidden_dim)
+
+        # Positional encoding + Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=False,  # (S, B, E)
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer, num_layers=layer_dim
+        )
+        self.pos_encoder = PositionalEncoding(hidden_dim, dropout=dropout)
+
+        # Output projection to CTC logits
+        self.fc_decoder_out = nn.Linear(hidden_dim, n_classes + 1)  # +1 for blank
+
+    def forward(self, neuralInput, dayIdx):
+        # neuralInput: (batch_size, time, features)
+        neuralInput = torch.permute(neuralInput, (0, 2, 1))  # (B, D, T)
+        neuralInput = self.gaussianSmoother(neuralInput)
+        neuralInput = torch.permute(neuralInput, (0, 2, 1))  # (B, T, D)
+
+        # apply day layer, same as GRUDecoder
+        dayWeights = torch.index_select(self.dayWeights, 0, dayIdx) 
+        transformedNeural = torch.einsum(
+            "btd,bdk->btk", neuralInput, dayWeights
+        ) + torch.index_select(self.dayBias, 0, dayIdx) 
+        transformedNeural = self.inputLayerNonlinearity(transformedNeural)
+
+        # stride/kernel via unfold: same as GRUDecoder
+        stridedInputs = torch.permute(
+            self.unfolder(
+                torch.unsqueeze(torch.permute(transformedNeural, (0, 2, 1)), 3)
+            ),
+            (0, 2, 1),
+        )  
+
+        # New: project to d_model (hidden_dim)
+        x = self.input_proj(stridedInputs)  # (B, S, hidden_dim)
+
+        # transformer expects (S, B, E)
+        x = x.permute(1, 0, 2)  # (S, B, hidden_dim)
+
+        # positional encoding + transformer
+        x = self.pos_encoder(x)             # (S, B, hidden_dim)
+        hid = self.transformer_encoder(x)   # (S, B, hidden_dim)
+
+        # back to (B, S, hidden_dim)
+        hid = hid.permute(1, 0, 2)
+
+        # final classifier
+        seq_out = self.fc_decoder_out(hid)  # (B, S, n_classes+1)
+
         return seq_out

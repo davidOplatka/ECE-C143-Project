@@ -28,6 +28,13 @@ args['l2_decay'] = 1e-5
 args['timeMaskNum'] = 20        # N: number of masks per trial
 args['timeMaskMaxFrac'] = 0.075 # M: max mask length as fraction of trial length
 
+# --- Configurable Model Choice ---
+args['modelType'] = 'transformer' # options: 'gru', 'transformer' ... (More TODOs)
+
+# --- Transformer hyperparameters ---
+args['nhead'] = 8
+args['dim_feedforward'] = 4096
+
 from neural_decoder.neural_decoder_trainer import trainModel
 
 trainModel(args)

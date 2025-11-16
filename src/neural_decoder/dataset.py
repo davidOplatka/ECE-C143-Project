@@ -1,9 +1,10 @@
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 
 class SpeechDataset(Dataset):
-    def __init__(self, data, transform=None):
+    def __init__(self, data, transform=None, electrodes_to_drop = None):
         self.data = data
         self.transform = transform
         self.n_days = len(data)
@@ -14,13 +15,29 @@ class SpeechDataset(Dataset):
         self.neural_time_bins = []
         self.phone_seq_lens = []
         self.days = []
-        for day in range(self.n_days):
-            for trial in range(len(data[day]["sentenceDat"])):
-                self.neural_feats.append(data[day]["sentenceDat"][trial])
-                self.phone_seqs.append(data[day]["phonemes"][trial])
-                self.neural_time_bins.append(data[day]["sentenceDat"][trial].shape[0])
-                self.phone_seq_lens.append(data[day]["phoneLens"][trial])
-                self.days.append(day)
+
+        if electrodes_to_drop is None:
+            for day in range(self.n_days):
+                for trial in range(len(data[day]["sentenceDat"])):
+                    self.neural_feats.append(data[day]["sentenceDat"][trial])
+                    self.phone_seqs.append(data[day]["phonemes"][trial])
+                    self.neural_time_bins.append(data[day]["sentenceDat"][trial].shape[0])
+                    self.phone_seq_lens.append(data[day]["phoneLens"][trial])
+                    self.days.append(day)
+        else:
+            for day in range(self.n_days):
+                for trial in range(len(data[day]["sentenceDat"])):
+                    self.neural_feats.append(
+                        np.delete(
+                            data[day]["sentenceDat"][trial],
+                            electrodes_to_drop,
+                            axis=1
+                        )
+                    )
+                    self.phone_seqs.append(data[day]["phonemes"][trial])
+                    self.neural_time_bins.append(data[day]["sentenceDat"][trial].shape[0])
+                    self.phone_seq_lens.append(data[day]["phoneLens"][trial])
+                    self.days.append(day)
 
     def __len__(self):
         return self.n_trials

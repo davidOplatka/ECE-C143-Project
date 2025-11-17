@@ -72,13 +72,27 @@ class GRUDecoder(nn.Module):
                 thisLayer.weight + torch.eye(neural_dim)
             )
 
+        # Old:
+        # if self.bidirectional:
+        #     self.fc_decoder_out = nn.Linear(
+        #         hidden_dim * 2, n_classes + 1
+        #     )  # +1 for CTC blank
+        # else:
+        #     self.fc_decoder_out = nn.Linear(hidden_dim, n_classes + 1)  # +1 for CTC blank
+
+        # New structure: GRU → LayerNorm → FC1 → ReLU → Dropout → FC2 → logits
         # rnn outputs
         if self.bidirectional:
-            self.fc_decoder_out = nn.Linear(
-                hidden_dim * 2, n_classes + 1
-            )  # +1 for CTC blank
+            gru_output_dim = hidden_dim * 2
         else:
-            self.fc_decoder_out = nn.Linear(hidden_dim, n_classes + 1)  # +1 for CTC blank
+            gru_output_dim = hidden_dim
+
+        # --- Post-GRU normalization + MLP head ---
+        self.post_ln = nn.LayerNorm(gru_output_dim)                 # LayerNorm on GRU outputs
+        self.post_fc1 = nn.Linear(gru_output_dim, gru_output_dim)   # First FC layer, same dim
+        self.post_dropout = nn.Dropout(self.dropout)                # Dropout for regularization
+        self.post_fc2 = nn.Linear(gru_output_dim, n_classes + 1)    # Final FC layer for mapping to class logits (+1 for CTC blank)
+
 
     def forward(self, neuralInput, dayIdx):
         neuralInput = torch.permute(neuralInput, (0, 2, 1))
@@ -116,8 +130,18 @@ class GRUDecoder(nn.Module):
                 device=self.device,
             ).requires_grad_()
 
-        hid, _ = self.gru_decoder(stridedInputs, h0.detach())
+        hid, _ = self.gru_decoder(stridedInputs, h0.detach())   # shape: (batch, T_out, gru_output_dim)
 
-        # get seq
-        seq_out = self.fc_decoder_out(hid)
+        # # get seq
+        # seq_out = self.fc_decoder_out(hid)
+        # return seq_out
+    
+        # --- LayerNorm → FC1 → ReLU → Dropout → FC2 ---
+
+        out = self.post_ln(hid)         # Normalize GRU outputs across features for each time step
+        out = self.post_fc1(out)        # First FC layer
+        out = torch.relu(out)
+        out = self.post_dropout(out)
+        seq_out = self.post_fc2(out)    # Final FC layer to produce class logits per time step
+
         return seq_out

@@ -228,6 +228,13 @@ def trainModel(args):
             eps=args['optimizerEps'],
             weight_decay=args["l2_decay"],
         )
+    elif args["optimizer"] == "SGD":
+        optimizer = torch.optim.SGD(
+            model.parameters(),
+            lr=args["lrStart"],
+            momentum=args.get("SGDMomentum", 0),
+            weight_decay=args["l2_decay"],
+        )
     else:
         optimizer = torch.optim.Adam(
             model.parameters(),
@@ -246,12 +253,15 @@ def trainModel(args):
     # --train--
     testLoss = []
     testCER = []
+
+    patience = args.get("patience", np.inf)
+    patience_counter = 0
+
     startTime = time.time()
     for batch in range(args["nBatch"]):
         model.train()
 
         X, y, X_len, y_len, dayIdx = next(iter(trainLoader))
-        print(f"DEBUG: BATCH X SHAPE IS {X.shape}")
         X, y, X_len, y_len, dayIdx = (
             X.to(device),
             y.to(device),
@@ -354,6 +364,9 @@ def trainModel(args):
 
             if len(testCER) > 0 and cer < np.min(testCER):
                 torch.save(model.state_dict(), args["outputDir"] + "/modelWeights")
+                patience_counter = 0
+            else:
+                patience_counter += 1
             testLoss.append(avgDayLoss)
             testCER.append(cer)
 
@@ -363,6 +376,9 @@ def trainModel(args):
 
             with open(args["outputDir"] + "/trainingStats", "wb") as file:
                 pickle.dump(tStats, file)
+            
+            if patience_counter == patience:
+                break
 
 
 def loadModel(modelDir, nInputLayers=24, device="cuda"):

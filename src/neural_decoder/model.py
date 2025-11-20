@@ -4,6 +4,47 @@ from torch import nn
 from .augmentations import GaussianSmoothing
 
 
+# Add TDS blocks class
+class TDSConvBlock(nn.Module):
+    """
+    TDS conv block:
+    depthwise temporal conv -> pointwise conv -> ReLU -> Dropout -> Residual -> LayerNorm
+    """
+    def __init__(self, channels, kernel_size=5, dropout=0.2):
+        super().__init__()
+        # Depthwise conv captures per-channel temporal motifs
+        self.dw = nn.Conv1d(
+            channels, channels,
+            kernel_size=kernel_size,
+            padding=kernel_size // 2,
+            groups=channels,      # depthwise along time
+            bias=True
+        )
+        # Pointwise conv mixes across channels
+        self.pw = nn.Conv1d(
+            channels, channels,
+            kernel_size=1,
+            bias=True
+        )
+        self.act = nn.ReLU()
+        self.drop = nn.Dropout(dropout)
+        self.ln = nn.LayerNorm(channels)
+
+    def forward(self, x):  # x: (B, C, T)
+        res = x
+        x = self.dw(x)
+        x = self.pw(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = x + res  # residual
+
+        # LayerNorm expects (B, T, C), so transpose twice
+        x = x.transpose(1, 2)   # (B, T, C)
+        x = self.ln(x)
+        x = x.transpose(1, 2)   # (B, C, T)
+        return x
+
+
 class GRUDecoder(nn.Module):
     def __init__(
         self,
@@ -34,9 +75,9 @@ class GRUDecoder(nn.Module):
         self.gaussianSmoothWidth = gaussianSmoothWidth
         self.bidirectional = bidirectional
         self.inputLayerNonlinearity = torch.nn.Softsign()
-        self.unfolder = torch.nn.Unfold(
-            (self.kernelLen, 1), dilation=1, padding=0, stride=self.strideLen
-        )
+        # self.unfolder = torch.nn.Unfold(
+        #     (self.kernelLen, 1), dilation=1, padding=0, stride=self.strideLen
+        # ) 
         self.gaussianSmoother = GaussianSmoothing(
             neural_dim, 20, self.gaussianSmoothWidth, dim=1
         )
@@ -46,9 +87,32 @@ class GRUDecoder(nn.Module):
         for x in range(nDays):
             self.dayWeights.data[x, :, :] = torch.eye(neural_dim)
 
+
+        # --- NEW: TDS Conv front-end ---
+        self.tds_channels = neural_dim  # you can also try 384 or 512 later
+
+        # first temporal conv that also does the old stride/kernel downsampling
+        self.tds_in = nn.Conv1d(
+            in_channels=neural_dim,
+            out_channels=self.tds_channels,
+            kernel_size=self.kernelLen,
+            stride=self.strideLen,
+            padding=0,          # no padding keeps length formula unchanged
+            bias=True
+        )
+
+        # stack a few TDS blocks
+        num_tds_blocks = 3
+        self.tds_blocks = nn.Sequential(
+            *[TDSConvBlock(self.tds_channels, kernel_size=5, dropout=self.dropout)
+            for _ in range(num_tds_blocks)]
+        )
+
+
         # GRU layers
         self.gru_decoder = nn.GRU(
-            (neural_dim) * self.kernelLen,
+            # (neural_dim) * self.kernelLen, 
+            self.tds_channels, # NEW: conv outputs channels/timestep
             hidden_dim,
             layer_dim,
             batch_first=True,
@@ -72,6 +136,7 @@ class GRUDecoder(nn.Module):
                 thisLayer.weight + torch.eye(neural_dim)
             )
 
+    
         # Old:
         # if self.bidirectional:
         #     self.fc_decoder_out = nn.Linear(
@@ -106,13 +171,22 @@ class GRUDecoder(nn.Module):
         ) + torch.index_select(self.dayBias, 0, dayIdx)
         transformedNeural = self.inputLayerNonlinearity(transformedNeural)
 
-        # stride/kernel
-        stridedInputs = torch.permute(
-            self.unfolder(
-                torch.unsqueeze(torch.permute(transformedNeural, (0, 2, 1)), 3)
-            ),
-            (0, 2, 1),
-        )
+        # OLD: stride/kernel
+        # stridedInputs = torch.permute(
+        #     self.unfolder(
+        #         torch.unsqueeze(torch.permute(transformedNeural, (0, 2, 1)), 3)
+        #     ),
+        #     (0, 2, 1),
+        # )
+
+        # NEW: TDS conv pipeline
+        # transformedNeural: (B, T, F)
+        x = transformedNeural.permute(0, 2, 1)  # (B, F, T)
+        x = self.tds_in(x)        # (B, C, T_out)  C = tds_channels
+        x = self.tds_blocks(x)    # (B, C, T_out)
+        stridedInputs = x.permute(0, 2, 1)  # (B, T_out, C)
+
+
 
         # apply RNN layer
         if self.bidirectional:

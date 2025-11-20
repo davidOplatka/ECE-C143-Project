@@ -11,16 +11,48 @@ from torch.utils.data import DataLoader
 
 from .model import GRUDecoder, LSTMDecoder
 from .dataset import SpeechDataset
+from .augmentations import SpeckleNoise
 
-def apply_speckle_mask(X, p: float):
+def apply_time_mask(X: torch.Tensor, max_mask_len: int, n_masks: int) -> torch.Tensor:
     """
-    Speckled masking / coordinated dropout over neural inputs.
+    SpecAugment-style time masking for neural time series.
+
+    Args:
+        X: [B, T, C] tensor (batch, time, channels)
+        max_mask_len: maximum length (in time steps) of each mask
+        n_masks: number of time masks per sequence
+
+    Returns:
+        X with some contiguous time segments zeroed out.
     """
-    if p <= 0.0:
+    if max_mask_len <= 0 or n_masks <= 0:
         return X
-    # Random mask keep with prob (1-p), zero with prob p
-    mask = (torch.rand_like(X) > p).float()
-    return X * mask
+
+    if X.dim() != 3:
+        # We only expect [B, T, C] here; if not, just skip masking.
+        return X
+
+    B, T, C = X.shape
+    if T == 0:
+        return X
+
+    max_mask_len = min(max_mask_len, T)
+
+    # Work in-place on X; gradients still flow through the remaining (unmasked) entries.
+    for b in range(B):
+        for _ in range(n_masks):
+            # Random mask length in [1, max_mask_len]
+            L = int(torch.randint(1, max_mask_len + 1, (1,), device=X.device).item())
+            if L >= T:
+                t0 = 0
+            else:
+                # Random start index so that t0 + L <= T
+                t0 = int(torch.randint(0, T - L + 1, (1,), device=X.device).item())
+
+            X[b, t0 : t0 + L, :] = 0.0
+
+    return X
+
 
 def getDatasetLoaders(
     datasetName,
@@ -127,6 +159,9 @@ def trainModel(args):
         end_factor=args["lrEnd"] / args["lrStart"],
         total_iters=args["nBatch"],
     )
+        # Instantiate speckled masking (input dropout) as an augmentation module
+    speckle_prob = float(args.get("speckle_prob", 0.0))
+    speckle_noise = SpeckleNoise(p=speckle_prob).to(device)
 
     # --train--
     testLoss = []
@@ -154,9 +189,15 @@ def trainModel(args):
                 * args["constantOffsetSD"]
             )
         # Speckled masking / coordinated dropout on neural inputs 
-        speckle_prob = args["speckle_prob"] if "speckle_prob" in args else 0.0
         if speckle_prob > 0.0:
-            X = apply_speckle_mask(X, speckle_prob)
+            # speckle_noise is an nn.Module living on the same device
+            X = speckle_noise(X)
+
+         #Time masking (SpecAugment-style) on neural inputs (training only)
+        time_mask_max_len = int(args.get("timeMask_maxLen", 0))
+        time_mask_n_masks = int(args.get("timeMask_nMasks", 0))
+        if time_mask_max_len > 0 and time_mask_n_masks > 0:
+            X = apply_time_mask(X, time_mask_max_len, time_mask_n_masks)
 
         # Compute prediction error
         pred = model.forward(X, dayIdx)

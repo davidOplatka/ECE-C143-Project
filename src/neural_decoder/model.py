@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from neural_decoder.augmentations import GaussianSmoothing
+from neural_decoder.augmentations import GaussianSmoothing, SpeckleNoise
 
 
 class GRUDecoder(nn.Module):

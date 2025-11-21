@@ -120,8 +120,8 @@ def trainModel(args):
     trainLoader, testLoader, loadedData = getDatasetLoaders(
         args["datasetPath"],
         args["batchSize"],
-        num_threshold_crossings=args["nThresholdCrossings"],
-        num_spike_band_powers=args["nSpikeBandPowers"]
+        num_threshold_crossings=args.get("nThresholdCrossings", 128),
+        num_spike_band_powers=args.get("nSpikeBandPowers", 128)
     )
 
     model = GRUDecoder(

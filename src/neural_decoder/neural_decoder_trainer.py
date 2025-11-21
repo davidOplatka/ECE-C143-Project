@@ -56,98 +56,11 @@ def apply_time_mask_batch(X, X_len, n_masks, max_mask_frac):
 
     return X
 
-def drop_correlated_electrodes(original_data, train_ds, target_num_electrodes):
-    """
-    Drop electrodes with high correlation to reduce input feature dimension.
-
-    Args:
-        original_data: Original loaded data dictionary.
-        train_ds: SpeechDataset for training.
-        target_num_electrodes: int, desired number of electrodes (input feature dim).
-
-    Returns:
-        train_ds_reduced, test_ds_reduced: SpeechDatasets with reduced input feature dim.
-    """
-    num_drop = (256 - target_num_electrodes) // 2
-    np.random.seed(0)
-
-    num_trials = 8800
-    num_electrodes = 128
-    num_feats = 2
-
-    # Creates single concatenated list per electrode per feature
-    buffers = [[[] for _ in range(num_electrodes)] for _ in range(num_feats)]
-
-    for i in range(num_trials):
-        X = train_ds[i][0]
-        X = X.squeeze().numpy()
-        L = X.shape[0]
-
-        trial_fc = X.reshape(L, num_feats, num_electrodes)
-
-        for f in range(num_feats):
-            data_f = trial_fc[:, f, :]
-            for ch in range(num_electrodes):
-                buffers[f][ch].append(data_f[:, ch])
-
-    # final vectors: feature × channel × samples
-    channel_vectors = [
-        [np.concatenate(buffers[f][ch]) for ch in range(num_electrodes)]
-        for f in range(num_feats)
-    ]
-
-    # compute correlations feature-wise
-    corr_matrices = [
-        np.corrcoef(np.vstack(channel_vectors[f]))
-        for f in range(num_feats)
-    ]
-
-    tc = corr_matrices[0].copy()
-    np.fill_diagonal(tc, 0)
-
-    sbp = corr_matrices[1].copy()
-    np.fill_diagonal(sbp, 0)
-
-    average_correlation = (tc + sbp) / 2
-
-    sorted_indices_flat = np.argsort(average_correlation.ravel())[::-1]
-
-    rows, cols = np.unravel_index(sorted_indices_flat, average_correlation.shape)
-    sorted_indices = list(zip(rows, cols))
-    sorted_indices = sorted_indices[::2] # remove duplicates (i,j) and (j,i)
-
-    drop = set()
-    keep = set()
-
-    while (len(sorted_indices) > 0) & (len(drop) < num_drop):
-        electrode1, electrode2 = sorted_indices.pop(0)
-        if (
-            (electrode1 not in drop and electrode2 not in drop) and
-            (electrode1 not in keep and electrode2 not in keep)
-        ):
-            if np.random.rand() < 0.5:
-                drop.add(electrode1)
-                keep.add(electrode2)
-            else:
-                drop.add(electrode2)
-                keep.add(electrode1)
-
-    dropped_features = list(drop)
-    for feature in dropped_features:
-        drop.add(feature + 128) # add coresponding feature channel for each dropped electrode
-    
-    drop = np.array(list(drop))
-
-    train_ds_reduced = SpeechDataset(original_data["train"], transform=None, electrodes_to_drop=drop)
-    test_ds_reduced = SpeechDataset(original_data["test"], electrodes_to_drop=drop)
-
-    return train_ds_reduced, test_ds_reduced
-
-
 def getDatasetLoaders(
     datasetName,
     batchSize,
-    inputSize=256,
+    num_threshold_crossings=128,
+    num_spike_band_powers=128
 ):
     with open(datasetName, "rb") as handle:
         loadedData = pickle.load(handle)
@@ -165,11 +78,16 @@ def getDatasetLoaders(
             torch.stack(days),
         )
 
-    train_ds = SpeechDataset(loadedData["train"], transform=None)
-    test_ds = SpeechDataset(loadedData["test"])
-
-    if inputSize < 256:
-        train_ds, test_ds = drop_correlated_electrodes(loadedData, train_ds, inputSize)
+    train_ds = SpeechDataset(
+        loadedData["train"],
+        transform=None,
+        num_threshold_crossings=num_threshold_crossings,
+        num_spike_band_powers=num_spike_band_powers
+    )
+    test_ds = SpeechDataset(
+        loadedData["test"],
+        num_threshold_crossings=num_threshold_crossings,
+        num_spike_band_powers=num_spike_band_powers)
 
     train_loader = DataLoader(
         train_ds,
@@ -202,11 +120,15 @@ def trainModel(args):
     trainLoader, testLoader, loadedData = getDatasetLoaders(
         args["datasetPath"],
         args["batchSize"],
-        inputSize=args["nInputFeatures"],
+        num_threshold_crossings=args["nThresholdCrossings"],
+        num_spike_band_powers=args["nSpikeBandPowers"]
     )
 
     model = GRUDecoder(
-        neural_dim=args["nInputFeatures"],
+        neural_dim=args["nInputFeatures"] if (
+            (args.get("nThresholdCrossings") is None) |
+            (args.get("nSpikeBandPowers") is None)
+        ) else args["nThresholdCrossings"] + args["nSpikeBandPowers"],
         n_classes=args["nClasses"],
         hidden_dim=args["nUnits"],
         layer_dim=args["nLayers"],
@@ -220,15 +142,7 @@ def trainModel(args):
     ).to(device)
 
     loss_ctc = torch.nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
-    if args["optimizer"] == "ADAMW":
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=args["lrStart"],
-            betas=(0.9, 0.999),
-            eps=args['optimizerEps'],
-            weight_decay=args["l2_decay"],
-        )
-    elif args["optimizer"] == "SGD":
+    if args["optimizer"] == "SGD":
         optimizer = torch.optim.SGD(
             model.parameters(),
             lr=args["lrStart"],
@@ -409,7 +323,10 @@ def loadModel(modelDir, nInputLayers=24, device="cuda"):
         args = pickle.load(handle)
 
     model = GRUDecoder(
-        neural_dim=args["nInputFeatures"],
+        neural_dim=args["nInputFeatures"] if (
+            (args.get("nThresholdCrossings") is None) |
+            (args.get("nSpikeBandPowers") is None)
+        ) else args["nThresholdCrossings"] + args["nSpikeBandPowers"],
         n_classes=args["nClasses"],
         hidden_dim=args["nUnits"],
         layer_dim=args["nLayers"],

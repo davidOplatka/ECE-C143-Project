@@ -243,12 +243,34 @@ def trainModel(args):
             eps=args['optimizerEps'],
             weight_decay=args["l2_decay"],
         )
-    scheduler = torch.optim.lr_scheduler.LinearLR(
-        optimizer,
-        start_factor=1.0,
-        end_factor=args["lrEnd"] / args["lrStart"],
-        total_iters=args["nBatch"],
-    )
+    if args.get("warmupSteps", 0) > 0:
+        warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0, end_factor=args["lrStart"], total_iters=args["warmupSteps"])
+        if args["decayType"] == 'cosine':
+            decay_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=args["nBatch"] - args["warmupSteps"]
+            )
+        else:
+            decay_scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=1.0,
+                end_factor=args["lrEnd"] / args["lrStart"],
+                total_iters=args["nBatch"] - args["warmupSteps"],
+            )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup, decay_scheduler], milestones=[args["warmupSteps"]])
+    else:
+        if args["decayType"] == 'cosine':
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=args["nBatch"]
+            )
+        else:
+            scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=1.0,
+                end_factor=args["lrEnd"] / args["lrStart"],
+                total_iters=args["nBatch"],
+            )
 
     # --train--
     testLoss = []

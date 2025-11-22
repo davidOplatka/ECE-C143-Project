@@ -56,10 +56,11 @@ def apply_time_mask_batch(X, X_len, n_masks, max_mask_frac):
 
     return X
 
-
 def getDatasetLoaders(
     datasetName,
     batchSize,
+    num_threshold_crossings=128,
+    num_spike_band_powers=128
 ):
     with open(datasetName, "rb") as handle:
         loadedData = pickle.load(handle)
@@ -77,8 +78,16 @@ def getDatasetLoaders(
             torch.stack(days),
         )
 
-    train_ds = SpeechDataset(loadedData["train"], transform=None)
-    test_ds = SpeechDataset(loadedData["test"])
+    train_ds = SpeechDataset(
+        loadedData["train"],
+        transform=None,
+        num_threshold_crossings=num_threshold_crossings,
+        num_spike_band_powers=num_spike_band_powers
+    )
+    test_ds = SpeechDataset(
+        loadedData["test"],
+        num_threshold_crossings=num_threshold_crossings,
+        num_spike_band_powers=num_spike_band_powers)
 
     train_loader = DataLoader(
         train_ds,
@@ -111,10 +120,15 @@ def trainModel(args):
     trainLoader, testLoader, loadedData = getDatasetLoaders(
         args["datasetPath"],
         args["batchSize"],
+        num_threshold_crossings=args.get("nThresholdCrossings", 128),
+        num_spike_band_powers=args.get("nSpikeBandPowers", 128)
     )
 
     model = GRUDecoder(
-        neural_dim=args["nInputFeatures"],
+        neural_dim=args["nInputFeatures"] if (
+            (args.get("nThresholdCrossings") is None) |
+            (args.get("nSpikeBandPowers") is None)
+        ) else args["nThresholdCrossings"] + args["nSpikeBandPowers"],
         n_classes=args["nClasses"],
         hidden_dim=args["nUnits"],
         layer_dim=args["nLayers"],
@@ -128,26 +142,59 @@ def trainModel(args):
     ).to(device)
 
     loss_ctc = torch.nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=args["lrStart"],
-        betas=(0.9, 0.999),
-        eps=0.1,
-        weight_decay=args["l2_decay"],
-    )
-    scheduler = torch.optim.lr_scheduler.LinearLR(
-        optimizer,
-        start_factor=1.0,
-        end_factor=args["lrEnd"] / args["lrStart"],
-        total_iters=args["nBatch"],
-    )
+    if args["optimizer"] == "SGD":
+        optimizer = torch.optim.SGD(
+            model.parameters(),
+            lr=args["lrStart"],
+            momentum=args.get("SGDMomentum", 0),
+            weight_decay=args["l2_decay"],
+        )
+    else:
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=args["lrStart"],
+            betas=(0.9, 0.999),
+            eps=args['optimizerEps'],
+            weight_decay=args["l2_decay"],
+        )
+    if args.get("warmupSteps", 0) > 0:
+        warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1e-8, end_factor=1, total_iters=args["warmupSteps"])
+        if args["decayType"] == 'cosine':
+            decay_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=args["nBatch"] - args["warmupSteps"]
+            )
+        else:
+            decay_scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=1.0,
+                end_factor=args["lrEnd"] / args["lrStart"],
+                total_iters=args["nBatch"] - args["warmupSteps"],
+            )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup, decay_scheduler], milestones=[args["warmupSteps"]])
+    else:
+        if args["decayType"] == 'cosine':
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=args["nBatch"]
+            )
+        else:
+            scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=1.0,
+                end_factor=args["lrEnd"] / args["lrStart"],
+                total_iters=args["nBatch"],
+            )
 
     # --train--
     testLoss = []
     testCER = []
+
+    patience = args.get("patience", np.inf)
+    patience_counter = 0
+
     startTime = time.time()
     for batch in range(args["nBatch"]):
-        print(batch)
         model.train()
 
         X, y, X_len, y_len, dayIdx = next(iter(trainLoader))
@@ -253,6 +300,9 @@ def trainModel(args):
 
             if len(testCER) > 0 and cer < np.min(testCER):
                 torch.save(model.state_dict(), args["outputDir"] + "/modelWeights")
+                patience_counter = 0
+            else:
+                patience_counter += 1
             testLoss.append(avgDayLoss)
             testCER.append(cer)
 
@@ -262,6 +312,9 @@ def trainModel(args):
 
             with open(args["outputDir"] + "/trainingStats", "wb") as file:
                 pickle.dump(tStats, file)
+            
+            if patience_counter == patience:
+                break
 
 
 def loadModel(modelDir, nInputLayers=24, device="cuda"):
@@ -270,7 +323,10 @@ def loadModel(modelDir, nInputLayers=24, device="cuda"):
         args = pickle.load(handle)
 
     model = GRUDecoder(
-        neural_dim=args["nInputFeatures"],
+        neural_dim=args["nInputFeatures"] if (
+            (args.get("nThresholdCrossings") is None) |
+            (args.get("nSpikeBandPowers") is None)
+        ) else args["nThresholdCrossings"] + args["nSpikeBandPowers"],
         n_classes=args["nClasses"],
         hidden_dim=args["nUnits"],
         layer_dim=args["nLayers"],

@@ -31,7 +31,7 @@ class SpeckleNoise(nn.Module):
     This applies elementwise dropout on an input tensor of shape [B, T, C]
     (batch, time, channels) with probability p. During training, each element
     is zeroed with probability p and the remaining elements are scaled by
-    1 / (1 - p) (inverted dropout). At eval time, the input is returned unchanged.
+    1 / (1 - p). At eval time, the input is returned unchanged.
     """
     def __init__(self, p: float = 0.3):
         super().__init__()

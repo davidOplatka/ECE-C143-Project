@@ -1,18 +1,16 @@
 
-import sys
-import pathlib
+#import sys
+#import pathlib
 
 # Ensure the project's `src/` directory is on sys.path so package imports work
 # when running this script directly (without installing the package).
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'src'))
+#sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'src'))
 
 modelName = 'speechBaseline4'
 
 args = {}
 args['outputDir'] = '../models/' + modelName
-# dataset path should be relative to the project root when running
-# `python .\scripts\train_model.py` from the repository root.
-args['datasetPath'] = 'data/ptDecoder_ctc'
+args['datasetPath'] = '../data/ptDecoder_ctc'
 args['seqLen'] = 150
 args['maxTimeSeriesLen'] = 1200
 args['batchSize'] = 128
@@ -31,7 +29,7 @@ args['gaussianSmoothWidth'] = 2.0
 args['strideLen'] = 4
 args['kernelLen'] = 32
 args['bidirectional'] = False
-#args['speckle_prob'] = 0.3
+args['speckle_prob'] = 0.3
 args['l2_decay'] = 1e-5
 
 from neural_decoder.neural_decoder_trainer import trainModel

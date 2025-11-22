@@ -194,10 +194,10 @@ def trainModel(args):
             X = speckle_noise(X)
 
          #Time masking (SpecAugment-style) on neural inputs (training only)
-        time_mask_max_len = int(args.get("timeMask_maxLen", 0))
-        time_mask_n_masks = int(args.get("timeMask_nMasks", 0))
-        if time_mask_max_len > 0 and time_mask_n_masks > 0:
-            X = apply_time_mask(X, time_mask_max_len, time_mask_n_masks)
+        timeMaskMaxFrac = int(args.get("timeMask_maxLen", 0))
+        timeMaskNum = int(args.get("timeMask_nMasks", 0))
+        if timeMaskMaxFrac > 0 and timeMaskNum > 0:
+            X = apply_time_mask(X, timeMaskMaxFrac, timeMaskNum)
 
         # Compute prediction error
         pred = model.forward(X, dayIdx)

@@ -25,11 +25,11 @@ class SpeechDataset(Dataset):
                     self.phone_seq_lens.append(data[day]["phoneLens"][trial])
                     self.days.append(day)
         else:
-            pcs_tc = np.load("../../data/threshold_crossing_principal_components.npy")
-            pcs_sbp = np.load("../../data/spike_band_power_principal_components.npy")
+            pcs_tc = np.load("../data/threshold_crossing_principal_components.npy")
+            pcs_sbp = np.load("../data/spike_band_power_principal_components.npy")
 
-            tc_mean = np.load("../../data/threshold_crossings_mean.npy")
-            sbp_mean = np.load("../../data/spike_band_power_mean.npy")
+            tc_mean = np.load("../data/threshold_crossings_mean.npy")
+            sbp_mean = np.load("../data/spike_band_power_mean.npy")
 
             for day in range(self.n_days):
                 for trial in range(len(data[day]["sentenceDat"])):

@@ -158,7 +158,7 @@ def trainModel(args):
             weight_decay=args["l2_decay"],
         )
     if args.get("warmupSteps", 0) > 0:
-        warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0, end_factor=args["lrStart"], total_iters=args["warmupSteps"])
+        warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1e-8, end_factor=1, total_iters=args["warmupSteps"])
         if args["decayType"] == 'cosine':
             decay_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,

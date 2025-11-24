@@ -156,11 +156,7 @@ def trainModel(args):
     os.makedirs(args["outputDir"], exist_ok=True)
     torch.manual_seed(args["seed"])
     np.random.seed(args["seed"])
-    # Select device: use GPU only if CUDA is available and initialized.
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Log chosen device so it's explicit in the output
-    print(f"Using device: {device}")
+    device = "cuda" 
 
     with open(args["outputDir"] + "/args", "wb") as file:
         pickle.dump(args, file)
@@ -202,6 +198,7 @@ def trainModel(args):
         kernelLen=args["kernelLen"],
         gaussianSmoothWidth=args["gaussianSmoothWidth"],
         bidirectional=args["bidirectional"],
+        use_tds=False # Added for TDS conditional
     ).to(device)
 
 

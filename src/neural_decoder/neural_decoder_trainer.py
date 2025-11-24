@@ -112,7 +112,7 @@ def trainModel(args):
     os.makedirs(args["outputDir"], exist_ok=True)
     torch.manual_seed(args["seed"])
     np.random.seed(args["seed"])
-    device = "cuda"
+    device = "cuda" 
 
     with open(args["outputDir"] + "/args", "wb") as file:
         pickle.dump(args, file)
@@ -139,6 +139,7 @@ def trainModel(args):
         kernelLen=args["kernelLen"],
         gaussianSmoothWidth=args["gaussianSmoothWidth"],
         bidirectional=args["bidirectional"],
+        use_tds=False # Added for TDS conditional
     ).to(device)
 
     loss_ctc = torch.nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)

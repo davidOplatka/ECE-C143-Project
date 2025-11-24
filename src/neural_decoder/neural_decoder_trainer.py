@@ -196,7 +196,9 @@ def trainModel(args):
         kernelLen=args["kernelLen"],
         gaussianSmoothWidth=args["gaussianSmoothWidth"],
         bidirectional=args["bidirectional"],
-        use_tds=args['use_tds'] # Added for TDS conditional
+        use_tds=args['use_tds'],
+        num_tds_blocks=args['num_tds_blocks'],
+        tds_channels=args['tds_channels']
     ).to(device)
 
 
@@ -429,7 +431,9 @@ def loadModel(modelDir, nInputLayers=24, device="cuda"):
         kernelLen=args["kernelLen"],
         gaussianSmoothWidth=args["gaussianSmoothWidth"],
         bidirectional=args["bidirectional"],
-        use_tds=args['use_tds']
+        use_tds=args['use_tds'],
+        num_tds_blocks=args['num_tds_blocks'],
+        tds_channels=args['tds_channels']
     ).to(device)
 
     model.load_state_dict(torch.load(modelWeightPath, map_location=device))

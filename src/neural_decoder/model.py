@@ -218,8 +218,8 @@ class GRUDecoder(nn.Module):
         hid, _ = self.gru_decoder(stridedInputs, h0.detach())   # shape: (batch, T_out, gru_output_dim)
     
         # --- LayerNorm → FC1 → ReLU → Dropout → FC2 ---
-
         out = self.post_ln(hid)         # Normalize GRU outputs across features for each time step
+        out = self.post_dropout(out)
         out = self.post_fc1(out)        # First FC layer
         out = torch.relu(out)
         out = self.post_dropout(out)
@@ -413,6 +413,7 @@ class LSTMDecoder(nn.Module):
 
         # --- LayerNorm → FC1 → ReLU → Dropout → FC2 ---
         out = self.post_ln(hid)         # Normalize LSTM outputs across features for each time step
+        out = self.post_dropout(out)
         out = self.post_fc1(out)        # First FC layer
         out = torch.relu(out)
         out = self.post_dropout(out)

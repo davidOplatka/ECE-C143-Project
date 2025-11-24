@@ -9,8 +9,49 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 
-from .model import GRUDecoder
+from .model import GRUDecoder, LSTMDecoder
 from .dataset import SpeechDataset
+from .augmentations import SpeckleNoise
+
+def apply_time_mask(X: torch.Tensor, max_mask_len: int, n_masks: int) -> torch.Tensor:
+    """
+    SpecAugment-style time masking for neural time series.
+
+    Args:
+        X: [B, T, C] tensor (batch, time, channels)
+        max_mask_len: maximum length (in time steps) of each mask
+        n_masks: number of time masks per sequence
+
+    Returns:
+        X with some contiguous time segments zeroed out.
+    """
+    if max_mask_len <= 0 or n_masks <= 0:
+        return X
+
+    if X.dim() != 3:
+        # We only expect [B, T, C] here; if not, just skip masking.
+        return X
+
+    B, T, C = X.shape
+    if T == 0:
+        return X
+
+    max_mask_len = min(max_mask_len, T)
+
+    # Work in-place on X; gradients still flow through the remaining (unmasked) entries.
+    for b in range(B):
+        for _ in range(n_masks):
+            # Random mask length in [1, max_mask_len]
+            L = int(torch.randint(1, max_mask_len + 1, (1,), device=X.device).item())
+            if L >= T:
+                t0 = 0
+            else:
+                # Random start index so that t0 + L <= T
+                t0 = int(torch.randint(0, T - L + 1, (1,), device=X.device).item())
+
+            X[b, t0 : t0 + L, :] = 0.0
+
+    return X
 
 def apply_time_mask_batch(X, X_len, n_masks, max_mask_frac):
     """
@@ -89,12 +130,15 @@ def getDatasetLoaders(
         num_threshold_crossings=num_threshold_crossings,
         num_spike_band_powers=num_spike_band_powers)
 
+    # Only pin memory when CUDA is available to avoid warnings on CPU-only systems
+    use_pin_memory = torch.cuda.is_available()
+
     train_loader = DataLoader(
         train_ds,
         batch_size=batchSize,
         shuffle=True,
         num_workers=0,
-        pin_memory=True,
+        pin_memory=use_pin_memory,
         collate_fn=_padding,
     )
     test_loader = DataLoader(
@@ -102,7 +146,7 @@ def getDatasetLoaders(
         batch_size=batchSize,
         shuffle=False,
         num_workers=0,
-        pin_memory=True,
+        pin_memory=use_pin_memory,
         collate_fn=_padding,
     )
 
@@ -124,6 +168,21 @@ def trainModel(args):
         num_spike_band_powers=args.get("nSpikeBandPowers", 128)
     )
 
+       # Choose RNN type (default to GRU if not specified)
+    if "rnn_type" in args:
+        rnn_type = str(args["rnn_type"]).lower()
+    else:
+        rnn_type = "gru"
+
+    if rnn_type == "gru":
+        ModelClass = GRUDecoder
+    elif rnn_type == "lstm":
+        ModelClass = LSTMDecoder
+    else:
+        raise ValueError(f"Unknown rnn_type: {rnn_type}. Use 'gru' or 'lstm'.")
+
+    model = ModelClass(
+        neural_dim=args["nInputFeatures"],
     model = GRUDecoder(
         neural_dim=args["nInputFeatures"] if (
             (args.get("nThresholdCrossings") is None) |
@@ -142,7 +201,10 @@ def trainModel(args):
         use_tds=False # Added for TDS conditional
     ).to(device)
 
+
     loss_ctc = torch.nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
+    speckle_prob = float(args.get("speckle_prob", 0.0))
+    speckle_noise = SpeckleNoise(p=speckle_prob).to(device)
     if args["optimizer"] == "SGD":
         optimizer = torch.optim.SGD(
             model.parameters(),
@@ -186,6 +248,7 @@ def trainModel(args):
                 end_factor=args["lrEnd"] / args["lrStart"],
                 total_iters=args["nBatch"],
             )
+  
 
     # --train--
     testLoss = []
@@ -216,6 +279,16 @@ def trainModel(args):
                 torch.randn([X.shape[0], 1, X.shape[2]], device=device)
                 * args["constantOffsetSD"]
             )
+        # Speckled masking / coordinated dropout on neural inputs 
+        if speckle_prob > 0.0:
+            # speckle_noise is an nn.Module living on the same device
+            X = speckle_noise(X)
+
+         #Time masking (SpecAugment-style) on neural inputs (training only)
+        timeMaskMaxFrac = int(args.get("timeMask_maxLen", 0))
+        timeMaskNum = int(args.get("timeMask_nMasks", 0))
+        if timeMaskMaxFrac > 0 and timeMaskNum > 0:
+            X = apply_time_mask(X, timeMaskMaxFrac, timeMaskNum)
 
         # Apply time masking augmentation
         n_masks = args.get("timeMaskNum", 0)
@@ -237,6 +310,13 @@ def trainModel(args):
         # Backpropagation
         optimizer.zero_grad()
         loss.backward()
+
+        # Gradient clipping to prevent exploding gradients
+        max_grad_norm = args["max_grad_norm"] if "max_grad_norm" in args else 0.0
+        if max_grad_norm and max_grad_norm > 0.0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+
+
         optimizer.step()
         scheduler.step()
 
@@ -323,6 +403,21 @@ def loadModel(modelDir, nInputLayers=24, device="cuda"):
     with open(modelDir + "/args", "rb") as handle:
         args = pickle.load(handle)
 
+    # rnn_type might not exist for older runs → default to GRU
+    if "rnn_type" in args:
+        rnn_type = str(args["rnn_type"]).lower()
+    else:
+        rnn_type = "gru"
+
+    if rnn_type == "gru":
+        ModelClass = GRUDecoder
+    elif rnn_type == "lstm":
+        ModelClass = LSTMDecoder
+    else:
+        raise ValueError(f"Unknown rnn_type: {rnn_type}. Use 'gru' or 'lstm'.")
+
+    model = ModelClass(
+        neural_dim=args["nInputFeatures"],
     model = GRUDecoder(
         neural_dim=args["nInputFeatures"] if (
             (args.get("nThresholdCrossings") is None) |

@@ -68,12 +68,9 @@ class GRUDecoder(nn.Module):
         kernelLen=14,
         gaussianSmoothWidth=0,
         bidirectional=False,
-
-        # Conditional logic for choosing whether to use TDS blocks or not
         use_tds=True,
         num_tds_blocks=3,
         tds_channels=None,
-
     ):
         super(GRUDecoder, self).__init__()
 
@@ -244,6 +241,9 @@ class LSTMDecoder(nn.Module):
         kernelLen=14,
         gaussianSmoothWidth=0,
         bidirectional=False,
+        use_tds=True,
+        num_tds_blocks=3,
+        tds_channels=None,
     ):
         super(LSTMDecoder, self).__init__()
 
@@ -276,21 +276,42 @@ class LSTMDecoder(nn.Module):
         )
         self.dayBias = torch.nn.Parameter(torch.zeros(nDays, 1, neural_dim))
 
+        self.use_tds = use_tds
+        self.num_tds_blocks = num_tds_blocks
+
         for x in range(nDays):
             self.dayWeights.data[x, :, :] = torch.eye(neural_dim)
 
-        # per-day input layers 
-        for x in range(nDays):
-            setattr(self, f"inpLayer{x}", nn.Linear(neural_dim, neural_dim))
-        for x in range(nDays):
-            thisLayer = getattr(self, f"inpLayer{x}")
-            thisLayer.weight = torch.nn.Parameter(
-                thisLayer.weight + torch.eye(neural_dim)
+        if not self.use_tds:
+            self.unfolder = torch.nn.Unfold(
+                (self.kernelLen, 1), dilation=1, padding=0, stride=self.strideLen
             )
+            lstm_input_dim = (neural_dim) * self.kernelLen
+
+        else: # TDS Conv
+            self.tds_channels = tds_channels or neural_dim
+
+            # first temporal conv that also does the old stride/kernel downsampling
+            self.tds_in = nn.Conv1d(
+                in_channels=neural_dim,
+                out_channels=self.tds_channels,
+                kernel_size=self.kernelLen,
+                stride=self.strideLen,
+                padding=0,          # no padding keeps length formula unchanged
+                bias=True
+            )
+
+            # stack a few TDS blocks
+            self.tds_blocks = nn.Sequential(
+                *[TDSConvBlock(self.tds_channels, kernel_size=5, dropout=self.dropout)
+                for _ in range(self.num_tds_blocks)]
+            )
+
+            lstm_input_dim = self.tds_channels
 
         # LSTM layers
         self.lstm_decoder = nn.LSTM(
-            neural_dim * self.kernelLen,  
+            lstm_input_dim,  
             hidden_dim,
             layer_dim,
             batch_first=True,
@@ -311,14 +332,27 @@ class LSTMDecoder(nn.Module):
                 #forget gate bias to 1.0
                 param.data[hidden_size : 2 * hidden_size].fill_(1.0)
 
+        # per-day input layers 
+        for x in range(nDays):
+            setattr(self, f"inpLayer{x}", nn.Linear(neural_dim, neural_dim))
+        for x in range(nDays):
+            thisLayer = getattr(self, f"inpLayer{x}")
+            thisLayer.weight = torch.nn.Parameter(
+                thisLayer.weight + torch.eye(neural_dim)
+            )
+
+        # New structure: LSTM → LayerNorm → FC1 → ReLU → Dropout → FC2 → logits
+        # rnn outputs
         if self.bidirectional:
-            self.fc_decoder_out = nn.Linear(
-                hidden_dim * 2, n_classes + 1  # +1 for CTC blank
-            )
+            lstm_output_dim = hidden_dim * 2
         else:
-            self.fc_decoder_out = nn.Linear(
-                hidden_dim, n_classes + 1  # +1 for CTC blank
-            )
+            lstm_output_dim = hidden_dim
+
+        # --- Post-GRU normalization + MLP head ---
+        self.post_ln = nn.LayerNorm(lstm_output_dim)                  # LayerNorm on LSTM outputs
+        self.post_fc1 = nn.Linear(lstm_output_dim, lstm_output_dim)   # First FC layer, same dim
+        self.post_dropout = nn.Dropout(self.dropout)                  # Dropout for regularization
+        self.post_fc2 = nn.Linear(lstm_output_dim, n_classes + 1)     # Final FC layer for mapping to class logits (+1 for CTC blank)
 
     def forward(self, neuralInput, dayIdx):
         """
@@ -339,13 +373,22 @@ class LSTMDecoder(nn.Module):
         )
         transformedNeural = self.inputLayerNonlinearity(transformedNeural)
 
-        
-        stridedInputs = torch.permute(
-            self.unfolder(
-                torch.unsqueeze(torch.permute(transformedNeural, (0, 2, 1)), 3)
-            ),
-            (0, 2, 1),
-        )  # [B, T', C * kernelLen]
+        if self.use_tds:
+            # TDS conv pipeline
+            # transformedNeural: (B, T, F)
+            x = transformedNeural.permute(0, 2, 1)  # (B, F, T)
+            x = self.tds_in(x)        # (B, C, T_out)  C = tds_channels
+            x = self.tds_blocks(x)    # (B, C, T_out)
+            stridedInputs = x.permute(0, 2, 1)  # (B, T_out, C)
+
+        else: 
+            # Baseline Unfold
+            stridedInputs = torch.permute(
+                self.unfolder(
+                    torch.unsqueeze(torch.permute(transformedNeural, (0, 2, 1)), 3)
+                ),
+                (0, 2, 1),
+            )
 
         # Initial hidden and cell states
         num_directions = 2 if self.bidirectional else 1
@@ -368,6 +411,11 @@ class LSTMDecoder(nn.Module):
         # LSTM forward
         hid, _ = self.lstm_decoder(stridedInputs, (h0.detach(), c0.detach()))
 
-        
-        seq_out = self.fc_decoder_out(hid)  
+        # --- LayerNorm → FC1 → ReLU → Dropout → FC2 ---
+        out = self.post_ln(hid)         # Normalize LSTM outputs across features for each time step
+        out = self.post_fc1(out)        # First FC layer
+        out = torch.relu(out)
+        out = self.post_dropout(out)
+        seq_out = self.post_fc2(out)    # Final FC layer to produce class logits per time step
+
         return seq_out

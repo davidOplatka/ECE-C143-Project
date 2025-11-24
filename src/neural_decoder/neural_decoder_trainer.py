@@ -182,8 +182,6 @@ def trainModel(args):
         raise ValueError(f"Unknown rnn_type: {rnn_type}. Use 'gru' or 'lstm'.")
 
     model = ModelClass(
-        neural_dim=args["nInputFeatures"],
-    model = GRUDecoder(
         neural_dim=args["nInputFeatures"] if (
             (args.get("nThresholdCrossings") is None) |
             (args.get("nSpikeBandPowers") is None)
@@ -198,7 +196,7 @@ def trainModel(args):
         kernelLen=args["kernelLen"],
         gaussianSmoothWidth=args["gaussianSmoothWidth"],
         bidirectional=args["bidirectional"],
-        use_tds=False # Added for TDS conditional
+        use_tds=args['use_tds'] # Added for TDS conditional
     ).to(device)
 
 
@@ -417,8 +415,6 @@ def loadModel(modelDir, nInputLayers=24, device="cuda"):
         raise ValueError(f"Unknown rnn_type: {rnn_type}. Use 'gru' or 'lstm'.")
 
     model = ModelClass(
-        neural_dim=args["nInputFeatures"],
-    model = GRUDecoder(
         neural_dim=args["nInputFeatures"] if (
             (args.get("nThresholdCrossings") is None) |
             (args.get("nSpikeBandPowers") is None)
@@ -433,6 +429,7 @@ def loadModel(modelDir, nInputLayers=24, device="cuda"):
         kernelLen=args["kernelLen"],
         gaussianSmoothWidth=args["gaussianSmoothWidth"],
         bidirectional=args["bidirectional"],
+        use_tds=args['use_tds']
     ).to(device)
 
     model.load_state_dict(torch.load(modelWeightPath, map_location=device))

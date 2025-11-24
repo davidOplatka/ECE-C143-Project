@@ -124,7 +124,20 @@ def trainModel(args):
         num_spike_band_powers=args.get("nSpikeBandPowers", 128)
     )
 
-    model = GRUDecoder(
+       # Choose RNN type (default to GRU if not specified)
+    if "rnn_type" in args:
+        rnn_type = str(args["rnn_type"]).lower()
+    else:
+        rnn_type = "gru"
+
+    if rnn_type == "gru":
+        ModelClass = GRUDecoder
+    elif rnn_type == "lstm":
+        ModelClass = LSTMDecoder
+    else:
+        raise ValueError(f"Unknown rnn_type: {rnn_type}. Use 'gru' or 'lstm'.")
+
+    model = ModelClass(
         neural_dim=args["nInputFeatures"] if (
             (args.get("nThresholdCrossings") is None) |
             (args.get("nSpikeBandPowers") is None)
@@ -139,6 +152,7 @@ def trainModel(args):
         kernelLen=args["kernelLen"],
         gaussianSmoothWidth=args["gaussianSmoothWidth"],
         bidirectional=args["bidirectional"],
+        use_tds=args['use_tds'] # Added for TDS conditional
     ).to(device)
 
     loss_ctc = torch.nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
@@ -322,7 +336,20 @@ def loadModel(modelDir, nInputLayers=24, device="cuda"):
     with open(modelDir + "/args", "rb") as handle:
         args = pickle.load(handle)
 
-    model = GRUDecoder(
+    # rnn_type might not exist for older runs → default to GRU
+    if "rnn_type" in args:
+        rnn_type = str(args["rnn_type"]).lower()
+    else:
+        rnn_type = "gru"
+
+    if rnn_type == "gru":
+        ModelClass = GRUDecoder
+    elif rnn_type == "lstm":
+        ModelClass = LSTMDecoder
+    else:
+        raise ValueError(f"Unknown rnn_type: {rnn_type}. Use 'gru' or 'lstm'.")
+
+    model = ModelClass(
         neural_dim=args["nInputFeatures"] if (
             (args.get("nThresholdCrossings") is None) |
             (args.get("nSpikeBandPowers") is None)
@@ -337,6 +364,7 @@ def loadModel(modelDir, nInputLayers=24, device="cuda"):
         kernelLen=args["kernelLen"],
         gaussianSmoothWidth=args["gaussianSmoothWidth"],
         bidirectional=args["bidirectional"],
+        use_tds=args['use_tds']
     ).to(device)
 
     model.load_state_dict(torch.load(modelWeightPath, map_location=device))

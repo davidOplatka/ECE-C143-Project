@@ -53,10 +53,55 @@ def apply_time_mask(X: torch.Tensor, max_mask_len: int, n_masks: int) -> torch.T
 
     return X
 
+def apply_time_mask_batch(X, X_len, n_masks, max_mask_frac):
+    """
+    Time-masking augmentation for GRU baseline.
+
+    Args:
+        X:        (B, T, C) tensor of neural features; B: batch size, T: max sequence length (padded), C: feature dim
+        X_len:    (B,) tensor of true sequence lengths (no padding, in time bins).
+        n_masks:  int, number of masks per trial (N in the paper).
+        max_mask_frac: float, max mask length as fraction of trial length (M in the paper).
+
+    Returns:
+        X with contiguous time segments zeroed out within [0, X_len[b]) for each b.
+    """
+    if n_masks <= 0 or max_mask_frac <= 0:
+        return X
+
+    B, T, C = X.shape
+    device = X.device
+
+    for b in range(B):
+        L = int(X_len[b].item())
+        if L <= 0:
+            continue
+
+        F = int(max_mask_frac * L)  # max mask length in time bins
+        if F <= 0:
+            continue
+
+        # For each mask, sample start S ~ U(0, L-F) and duration D ~ U(0, F)
+        for _ in range(n_masks):
+            max_start = max(L - F, 0)
+            # start index
+            if max_start > 0:
+                S = torch.randint(0, max_start + 1, (1,), device=device).item()
+            else:
+                S = 0
+            # duration (can be 0..F)
+            D = torch.randint(0, F + 1, (1,), device=device).item()
+
+            end = min(S + D, L)
+            X[b, S:end, :] = 0.0
+
+    return X
 
 def getDatasetLoaders(
     datasetName,
     batchSize,
+    num_threshold_crossings=128,
+    num_spike_band_powers=128
 ):
     with open(datasetName, "rb") as handle:
         loadedData = pickle.load(handle)
@@ -74,8 +119,16 @@ def getDatasetLoaders(
             torch.stack(days),
         )
 
-    train_ds = SpeechDataset(loadedData["train"], transform=None)
-    test_ds = SpeechDataset(loadedData["test"])
+    train_ds = SpeechDataset(
+        loadedData["train"],
+        transform=None,
+        num_threshold_crossings=num_threshold_crossings,
+        num_spike_band_powers=num_spike_band_powers
+    )
+    test_ds = SpeechDataset(
+        loadedData["test"],
+        num_threshold_crossings=num_threshold_crossings,
+        num_spike_band_powers=num_spike_band_powers)
 
     # Only pin memory when CUDA is available to avoid warnings on CPU-only systems
     use_pin_memory = torch.cuda.is_available()
@@ -115,6 +168,8 @@ def trainModel(args):
     trainLoader, testLoader, loadedData = getDatasetLoaders(
         args["datasetPath"],
         args["batchSize"],
+        num_threshold_crossings=args.get("nThresholdCrossings", 128),
+        num_spike_band_powers=args.get("nSpikeBandPowers", 128)
     )
 
        # Choose RNN type (default to GRU if not specified)
@@ -132,6 +187,11 @@ def trainModel(args):
 
     model = ModelClass(
         neural_dim=args["nInputFeatures"],
+    model = GRUDecoder(
+        neural_dim=args["nInputFeatures"] if (
+            (args.get("nThresholdCrossings") is None) |
+            (args.get("nSpikeBandPowers") is None)
+        ) else args["nThresholdCrossings"] + args["nSpikeBandPowers"],
         n_classes=args["nClasses"],
         hidden_dim=args["nUnits"],
         layer_dim=args["nLayers"],
@@ -146,26 +206,60 @@ def trainModel(args):
 
 
     loss_ctc = torch.nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=args["lrStart"],
-        betas=(0.9, 0.999),
-        eps=0.1,
-        weight_decay=args["l2_decay"],
-    )
-    scheduler = torch.optim.lr_scheduler.LinearLR(
-        optimizer,
-        start_factor=1.0,
-        end_factor=args["lrEnd"] / args["lrStart"],
-        total_iters=args["nBatch"],
-    )
-        # Instantiate speckled masking (input dropout) as an augmentation module
     speckle_prob = float(args.get("speckle_prob", 0.0))
     speckle_noise = SpeckleNoise(p=speckle_prob).to(device)
+    if args["optimizer"] == "SGD":
+        optimizer = torch.optim.SGD(
+            model.parameters(),
+            lr=args["lrStart"],
+            momentum=args.get("SGDMomentum", 0),
+            weight_decay=args["l2_decay"],
+        )
+    else:
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=args["lrStart"],
+            betas=(0.9, 0.999),
+            eps=args['optimizerEps'],
+            weight_decay=args["l2_decay"],
+        )
+    if args.get("warmupSteps", 0) > 0:
+        warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1e-8, end_factor=1, total_iters=args["warmupSteps"])
+        if args["decayType"] == 'cosine':
+            decay_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=args["nBatch"] - args["warmupSteps"]
+            )
+        else:
+            decay_scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=1.0,
+                end_factor=args["lrEnd"] / args["lrStart"],
+                total_iters=args["nBatch"] - args["warmupSteps"],
+            )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup, decay_scheduler], milestones=[args["warmupSteps"]])
+    else:
+        if args["decayType"] == 'cosine':
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=args["nBatch"]
+            )
+        else:
+            scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=1.0,
+                end_factor=args["lrEnd"] / args["lrStart"],
+                total_iters=args["nBatch"],
+            )
+  
 
     # --train--
     testLoss = []
     testCER = []
+
+    patience = args.get("patience", np.inf)
+    patience_counter = 0
+
     startTime = time.time()
     for batch in range(args["nBatch"]):
         model.train()
@@ -198,6 +292,12 @@ def trainModel(args):
         timeMaskNum = int(args.get("timeMask_nMasks", 0))
         if timeMaskMaxFrac > 0 and timeMaskNum > 0:
             X = apply_time_mask(X, timeMaskMaxFrac, timeMaskNum)
+
+        # Apply time masking augmentation
+        n_masks = args.get("timeMaskNum", 0)
+        max_mask_frac = args.get("timeMaskMaxFrac", 0.0)
+        if n_masks > 0 and max_mask_frac > 0.0:
+            X = apply_time_mask_batch(X, X_len, n_masks, max_mask_frac)
 
         # Compute prediction error
         pred = model.forward(X, dayIdx)
@@ -284,6 +384,9 @@ def trainModel(args):
 
             if len(testCER) > 0 and cer < np.min(testCER):
                 torch.save(model.state_dict(), args["outputDir"] + "/modelWeights")
+                patience_counter = 0
+            else:
+                patience_counter += 1
             testLoss.append(avgDayLoss)
             testCER.append(cer)
 
@@ -293,6 +396,9 @@ def trainModel(args):
 
             with open(args["outputDir"] + "/trainingStats", "wb") as file:
                 pickle.dump(tStats, file)
+            
+            if patience_counter == patience:
+                break
 
 
 def loadModel(modelDir, nInputLayers=24, device="cuda"):
@@ -315,6 +421,11 @@ def loadModel(modelDir, nInputLayers=24, device="cuda"):
 
     model = ModelClass(
         neural_dim=args["nInputFeatures"],
+    model = GRUDecoder(
+        neural_dim=args["nInputFeatures"] if (
+            (args.get("nThresholdCrossings") is None) |
+            (args.get("nSpikeBandPowers") is None)
+        ) else args["nThresholdCrossings"] + args["nSpikeBandPowers"],
         n_classes=args["nClasses"],
         hidden_dim=args["nUnits"],
         layer_dim=args["nLayers"],

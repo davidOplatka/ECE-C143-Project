@@ -9,7 +9,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 
-from .model import GRUDecoder, LSTMDecoder
+from .model import BaselineGRUDecoder, GRUDecoder, LSTMDecoder
 from .dataset import SpeechDataset
 from .augmentations import SpeckleNoise
 
@@ -168,39 +168,55 @@ def trainModel(args):
         num_spike_band_powers=args.get("nSpikeBandPowers", 128)
     )
 
-       # Choose RNN type (default to GRU if not specified)
+    # Choose RNN type (default to baseline model if not specified)
     if "rnn_type" in args:
         rnn_type = str(args["rnn_type"]).lower()
     else:
-        rnn_type = "gru"
+        rnn_type = "baseline-gru"
 
     if rnn_type == "gru":
         ModelClass = GRUDecoder
     elif rnn_type == "lstm":
         ModelClass = LSTMDecoder
+    elif rnn_type =="baseline-gru":
+        ModelClass = BaselineGRUDecoder
     else:
         raise ValueError(f"Unknown rnn_type: {rnn_type}. Use 'gru' or 'lstm'.")
 
-    model = ModelClass(
-        neural_dim=args["nInputFeatures"] if (
-            (args.get("nThresholdCrossings") is None) |
-            (args.get("nSpikeBandPowers") is None)
-        ) else args["nThresholdCrossings"] + args["nSpikeBandPowers"],
-        n_classes=args["nClasses"],
-        hidden_dim=args["nUnits"],
-        layer_dim=args["nLayers"],
-        nDays=len(loadedData["train"]),
-        dropout=args["dropout"],
-        device=device,
-        strideLen=args["strideLen"],
-        kernelLen=args["kernelLen"],
-        gaussianSmoothWidth=args["gaussianSmoothWidth"],
-        bidirectional=args["bidirectional"],
-        use_tds=args['use_tds'],
-        num_tds_blocks=args['num_tds_blocks'],
-        tds_channels=args['tds_channels']
-    ).to(device)
-
+    if rnn_type == "baseline-gru":
+        model = ModelClass(
+            neural_dim=args["nInputFeatures"],
+            n_classes=args["nClasses"],
+            hidden_dim=args["nUnits"],
+            layer_dim=args["nLayers"],
+            nDays=len(loadedData["train"]),
+            dropout=args["dropout"],
+            device=device,
+            strideLen=args["strideLen"],
+            kernelLen=args["kernelLen"],
+            gaussianSmoothWidth=args["gaussianSmoothWidth"],
+            bidirectional=args["bidirectional"],
+        ).to(device)
+    else:
+        model = ModelClass(
+            neural_dim=args["nInputFeatures"] if (
+                (args.get("nThresholdCrossings") is None) |
+                (args.get("nSpikeBandPowers") is None)
+            ) else args["nThresholdCrossings"] + args["nSpikeBandPowers"],
+            n_classes=args["nClasses"],
+            hidden_dim=args["nUnits"],
+            layer_dim=args["nLayers"],
+            nDays=len(loadedData["train"]),
+            dropout=args["dropout"],
+            device=device,
+            strideLen=args["strideLen"],
+            kernelLen=args["kernelLen"],
+            gaussianSmoothWidth=args["gaussianSmoothWidth"],
+            bidirectional=args["bidirectional"],
+            use_tds=args['use_tds'],
+            num_tds_blocks=args['num_tds_blocks'],
+            tds_channels=args['tds_channels']
+        ).to(device)
 
     loss_ctc = torch.nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
     speckle_prob = float(args.get("speckle_prob", 0.0))
@@ -403,38 +419,55 @@ def loadModel(modelDir, nInputLayers=24, device="cuda"):
     with open(modelDir + "/args", "rb") as handle:
         args = pickle.load(handle)
 
-    # rnn_type might not exist for older runs → default to GRU
+    # rnn_type might not exist for older runs → default to baseline model
     if "rnn_type" in args:
         rnn_type = str(args["rnn_type"]).lower()
     else:
-        rnn_type = "gru"
+        rnn_type = "baseline-gru"
 
     if rnn_type == "gru":
         ModelClass = GRUDecoder
     elif rnn_type == "lstm":
         ModelClass = LSTMDecoder
+    elif rnn_type =="baseline-gru":
+        ModelClass = BaselineGRUDecoder
     else:
         raise ValueError(f"Unknown rnn_type: {rnn_type}. Use 'gru' or 'lstm'.")
 
-    model = ModelClass(
-        neural_dim=args["nInputFeatures"] if (
-            (args.get("nThresholdCrossings") is None) |
-            (args.get("nSpikeBandPowers") is None)
-        ) else args["nThresholdCrossings"] + args["nSpikeBandPowers"],
-        n_classes=args["nClasses"],
-        hidden_dim=args["nUnits"],
-        layer_dim=args["nLayers"],
-        nDays=nInputLayers,
-        dropout=args["dropout"],
-        device=device,
-        strideLen=args["strideLen"],
-        kernelLen=args["kernelLen"],
-        gaussianSmoothWidth=args["gaussianSmoothWidth"],
-        bidirectional=args["bidirectional"],
-        use_tds=args['use_tds'],
-        num_tds_blocks=args['num_tds_blocks'],
-        tds_channels=args['tds_channels']
-    ).to(device)
+    if rnn_type == "baseline-gru":
+        model = ModelClass(
+            neural_dim=args["nInputFeatures"],
+            n_classes=args["nClasses"],
+            hidden_dim=args["nUnits"],
+            layer_dim=args["nLayers"],
+            nDays=nInputLayers,
+            dropout=args["dropout"],
+            device=device,
+            strideLen=args["strideLen"],
+            kernelLen=args["kernelLen"],
+            gaussianSmoothWidth=args["gaussianSmoothWidth"],
+            bidirectional=args["bidirectional"],
+        ).to(device)
+    else:
+        model = ModelClass(
+            neural_dim=args["nInputFeatures"] if (
+                (args.get("nThresholdCrossings") is None) |
+                (args.get("nSpikeBandPowers") is None)
+            ) else args["nThresholdCrossings"] + args["nSpikeBandPowers"],
+            n_classes=args["nClasses"],
+            hidden_dim=args["nUnits"],
+            layer_dim=args["nLayers"],
+            nDays=nInputLayers,
+            dropout=args["dropout"],
+            device=device,
+            strideLen=args["strideLen"],
+            kernelLen=args["kernelLen"],
+            gaussianSmoothWidth=args["gaussianSmoothWidth"],
+            bidirectional=args["bidirectional"],
+            use_tds=args.get('use_tds', False),
+            num_tds_blocks=args.get('num_tds_blocks', 0),
+            tds_channels=args.get('tds_channels', 0)
+        ).to(device)
 
     model.load_state_dict(torch.load(modelWeightPath, map_location=device))
     return model

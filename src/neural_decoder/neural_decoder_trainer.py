@@ -13,46 +13,6 @@ from .model import BaselineGRUDecoder, GRUDecoder, LSTMDecoder
 from .dataset import SpeechDataset
 from .augmentations import SpeckleNoise
 
-def apply_time_mask(X: torch.Tensor, max_mask_len: int, n_masks: int) -> torch.Tensor:
-    """
-    SpecAugment-style time masking for neural time series.
-
-    Args:
-        X: [B, T, C] tensor (batch, time, channels)
-        max_mask_len: maximum length (in time steps) of each mask
-        n_masks: number of time masks per sequence
-
-    Returns:
-        X with some contiguous time segments zeroed out.
-    """
-    if max_mask_len <= 0 or n_masks <= 0:
-        return X
-
-    if X.dim() != 3:
-        # We only expect [B, T, C] here; if not, just skip masking.
-        return X
-
-    B, T, C = X.shape
-    if T == 0:
-        return X
-
-    max_mask_len = min(max_mask_len, T)
-
-    # Work in-place on X; gradients still flow through the remaining (unmasked) entries.
-    for b in range(B):
-        for _ in range(n_masks):
-            # Random mask length in [1, max_mask_len]
-            L = int(torch.randint(1, max_mask_len + 1, (1,), device=X.device).item())
-            if L >= T:
-                t0 = 0
-            else:
-                # Random start index so that t0 + L <= T
-                t0 = int(torch.randint(0, T - L + 1, (1,), device=X.device).item())
-
-            X[b, t0 : t0 + L, :] = 0.0
-
-    return X
-
 def apply_time_mask_batch(X, X_len, n_masks, max_mask_frac):
     """
     Time-masking augmentation for GRU baseline.
@@ -299,12 +259,6 @@ def trainModel(args):
         if speckle_prob > 0.0:
             # speckle_noise is an nn.Module living on the same device
             X = speckle_noise(X)
-
-         #Time masking (SpecAugment-style) on neural inputs (training only)
-        timeMaskMaxFrac = int(args.get("timeMask_maxLen", 0))
-        timeMaskNum = int(args.get("timeMask_nMasks", 0))
-        if timeMaskMaxFrac > 0 and timeMaskNum > 0:
-            X = apply_time_mask(X, timeMaskMaxFrac, timeMaskNum)
 
         # Apply time masking augmentation
         n_masks = args.get("timeMaskNum", 0)

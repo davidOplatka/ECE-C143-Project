@@ -213,9 +213,9 @@ def trainModel(args):
             kernelLen=args["kernelLen"],
             gaussianSmoothWidth=args["gaussianSmoothWidth"],
             bidirectional=args["bidirectional"],
-            use_tds=args['use_tds'],
-            num_tds_blocks=args['num_tds_blocks'],
-            tds_channels=args['tds_channels']
+            use_tds=args.get('use_tds', False),
+            num_tds_blocks=args.get('num_tds_blocks', 0),
+            tds_channels=args.get('tds_channels', 0)
         ).to(device)
 
     loss_ctc = torch.nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
